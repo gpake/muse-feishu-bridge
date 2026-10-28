@@ -1,0 +1,19 @@
+{
+  "name": "muse-feishu-bridge",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Feishu (Lark) long-connection bridge: Feishu bot <-> file-queue agent worker. Allowlist-only, unofficial.",
+  "scripts": {
+    "feishu": "node src/feishu.mjs",
+    "feishu-watchdog": "node src/watchdog.mjs",
+    "feishu-mock-test": "node src/feishu-mock-test.mjs"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "@larksuiteoapi/node-sdk": "^1.76.0",
+    "https-proxy-agent": "^5.0.1"
+  },
+  "license": "MIT"
+}

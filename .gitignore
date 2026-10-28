@@ -1,0 +1,6 @@
+.credentials.env
+config.json
+queue/
+logs/
+node_modules/
+*.log

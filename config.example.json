@@ -1,0 +1,8 @@
+{
+  "allowedSenders": [
+    "ou_xxxxxxxxxxxxxxxx"
+  ],
+  "replyTimeoutMs": 600000,
+  "pollMs": 1000,
+  "mode": "feishu"
+}

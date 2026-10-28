@@ -63,6 +63,28 @@ FEISHU_APP_ID=cli_xxx FEISHU_APP_SECRET=xxx npm run feishu-watchdog
 （0600，仅所有者可读），watchdog 会在环境变量缺失时读取它；
 **该文件已被 `.gitignore` 挡住，永远不要提交**。能用环境变量时优先用环境变量。
 
+## Muse 侧还需要配的两件事（本仓库不含）
+
+桥接只做传输和表现，下面两条都在 Muse 侧，不配齐通道就跑不起来
+或断了回不来：
+
+1. **回答唤醒：每 5 秒扫 inbox 的 Hook。** 桥接不推理。Muse 侧需要
+   一条 Hook（或等价定时任务），每 5 秒扫 `queue/inbox/`，有新消息就
+   唤醒工人：先读 `queue/session.jsonl` 最近 30 回合做上下文、确认发送者
+   在白名单内，再把 `{"text": ...}` 或 `{"text": ..., "card": ...}` 写进
+   `queue/outbox/<同 id>.json`；长回答还要按小节追加到
+   `queue/stream/<id>.txt`。没有这一条，消息只进 inbox、永远没人回。
+   具体约定见 `docs/hook-example.md`，Hook 定义需按 Muse 运行时改写。
+
+2. **存活拉起：每 5 分钟检查一次的定时任务。** watchdog 只负责桥接
+   进程退出后重启；虚拟机/主机替换会连 watchdog 一起杀掉，
+   watchdog 没法自己把自己拉回来。所以 Muse 侧还需要一条每 5 分钟的
+   存活检查：`pgrep` 查 `src/watchdog.mjs` 与 `src/feishu.mjs`，死了就在
+   桥接目录后台重拉 watchdog，约 40 秒后验
+   `logs/feishu-watchdog.log` 出现 `feishu ws ready`；平时健康不打扰，
+   恢复失败才报。靠这条加断线补发，中断窗口约 5 分钟检查间隔加启动
+   时间、最长约 6 分钟，期间漏的消息重连后补发，不是实时送达。
+
 ## 测试
 
 ```bash
@@ -79,8 +101,9 @@ npm run feishu-mock-test
   付出的代价；纯文本消息无法 patch，因而无法流式。
 - Agent 侧的唤醒（本仓库外的 hook/定时任务如何扫 inbox、写 outbox）
   取决于你用的 agent 运行时，见 `docs/hook-example.md`，需按自己的运行时改写。
-- 非官方通道，无可用性保证；虚拟机/主机重启会短暂中断，靠 watchdog 与
-  断线补发恢复。
+- 非官方通道，无可用性保证；虚拟机/主机重启会短暂中断，靠 Muse 侧
+  5 分钟存活检查重拉 watchdog 加断线补发恢复。单靠 watchdog 不够，
+  因为它也会随虚拟机一起死。
 
 ## 许可证
 

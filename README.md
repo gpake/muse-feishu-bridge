@@ -63,10 +63,10 @@ FEISHU_APP_ID=cli_xxx FEISHU_APP_SECRET=xxx npm run feishu-watchdog
 （0600，仅所有者可读），watchdog 会在环境变量缺失时读取它；
 **该文件已被 `.gitignore` 挡住，永远不要提交**。能用环境变量时优先用环境变量。
 
-## Muse 侧还需要配的两件事（本仓库不含）
+## Muse 侧还需要配的三件事（本仓库不含）
 
-桥接只做传输和表现，下面两条都在 Muse 侧，不配齐通道就跑不起来
-或断了回不来：
+桥接只做传输和表现，下面三条都在 Muse 侧（第 3 条可选），不配齐前两条
+通道就跑不起来或断了回不来：
 
 1. **回答唤醒：每 5 秒扫 inbox 的 Hook。** 桥接不推理。Muse 侧需要
    一条 Hook（或等价定时任务），每 5 秒扫 `queue/inbox/`，有新消息就
@@ -76,14 +76,28 @@ FEISHU_APP_ID=cli_xxx FEISHU_APP_SECRET=xxx npm run feishu-watchdog
    `queue/stream/<id>.txt`。没有这一条，消息只进 inbox、永远没人回。
    具体约定见 `docs/hook-example.md`，Hook 定义需按 Muse 运行时改写。
 
-2. **存活拉起：每 5 分钟检查一次的定时任务。** watchdog 只负责桥接
-   进程退出后重启；虚拟机/主机替换会连 watchdog 一起杀掉，
-   watchdog 没法自己把自己拉回来。所以 Muse 侧还需要一条每 5 分钟的
-   存活检查：`pgrep` 查 `src/watchdog.mjs` 与 `src/feishu.mjs`，死了就在
-   桥接目录后台重拉 watchdog，约 40 秒后验
-   `logs/feishu-watchdog.log` 出现 `feishu ws ready`；平时健康不打扰，
-   恢复失败才报。靠这条加断线补发，中断窗口约 5 分钟检查间隔加启动
-   时间、最长约 6 分钟，期间漏的消息重连后补发，不是实时送达。
+2. **存活拉起：每 60 秒跑一次的脚本 Hook（不要用 agent 定时任务）。**
+   watchdog 只负责桥接进程退出后重启；虚拟机/主机替换会连 watchdog
+   一起杀掉，watchdog 没法自己把自己拉回来。Muse 侧需要一条每 60 秒
+   轮询的**脚本型** Hook：脚本 `pgrep` 查 `src/watchdog.mjs` 与
+   `src/feishu.mjs`，都在就静默退出（不开 agent 回合、零算力消耗）；
+   watchdog 不在就脱离会话后台重拉它、等约 25 秒自验进程已起，成功
+   同样静默；只有重拉失败、或桥接子进程在 watchdog 存活时消失超过
+   5 分钟，才唤醒 agent 兜底。脚本示例见 `docs/hook-example.md`。
+   早期版本用每 5 分钟的 agent 存活检查也能恢复（中断窗口最长约
+   6 分钟、漏消息靠断线补发），但每次检查都要开一个完整 agent 回合，
+   实测曾与同步任务合计占约三分之二的 token 消耗，故改成纯脚本。
+   脚本只是文件、不会自己跑：能跨重启生效，靠的是 agent 运行时在
+   虚拟机替换后重新接管已保存的 Hook，调度器在运行时那一层。
+
+3. **可选：把 agent 主聊天的回复同步到飞书。** 桥接已支持
+   `queue/sync/` 文件投递（见工作原理）。省算力的分工是“随手同步 +
+   低频兜底”：agent 在主聊天每次正式回复的同一回合，顺手把清洗后的
+   全文写成 `queue/sync/piggy-<毫秒>.json`（近乎即时，几乎不额外花
+   算力）；另设一条每 1 小时的 agent 兜底任务，按时间水位读主聊天
+   补漏，补发前先按 piggy 文件的全文与 15 分钟时间窗去重、跳过已
+   随手发过的。不要用高频 agent 定时任务做全量轮询同步：每次都要
+   重读上下文，是 token 消耗的大头。
 
 ## 测试
 
@@ -102,8 +116,8 @@ npm run feishu-mock-test
 - Agent 侧的唤醒（本仓库外的 hook/定时任务如何扫 inbox、写 outbox）
   取决于你用的 agent 运行时，见 `docs/hook-example.md`，需按自己的运行时改写。
 - 非官方通道，无可用性保证；虚拟机/主机重启会短暂中断，靠 Muse 侧
-  5 分钟存活检查重拉 watchdog 加断线补发恢复。单靠 watchdog 不够，
-  因为它也会随虚拟机一起死。
+  每 60 秒脚本 Hook 重拉 watchdog 加断线补发恢复（脚本发现并拉起
+  通常在约 1 分钟内）。单靠 watchdog 不够，因为它也会随虚拟机一起死。
 
 ## 许可证
 

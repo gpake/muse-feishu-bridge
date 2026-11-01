@@ -153,6 +153,36 @@ export async function sendCard(client, { receiveId, receiveIdType, card }) {
   return resp;
 }
 
+// Quote reply: message.reply creates the new message in the same chat with
+// a visible quote of the parent (the user's) message, so a reply reads on
+// its own after a gap. Same permissions as create (im:message +
+// send_as_bot), verified in the 2026-10-27 feature survey. A non-zero code
+// is thrown here so callers fall back to a plain create: a reply must
+// never be lost because its quote could not be attached.
+export async function replyText(client, { parentMessageId, text }) {
+  const resp = await client.im.v1.message.reply({
+    path: { message_id: parentMessageId },
+    data: { msg_type: "text", content: JSON.stringify({ text }) },
+  });
+  if (resp && resp.code !== undefined && resp.code !== 0) {
+    throw new Error(`quote reply rejected code=${resp.code} msg=${resp.msg || ""}`);
+  }
+  remember(resp?.data?.message_id);
+  return resp;
+}
+
+export async function replyCard(client, { parentMessageId, card }) {
+  const resp = await client.im.v1.message.reply({
+    path: { message_id: parentMessageId },
+    data: { msg_type: "interactive", content: JSON.stringify(card) },
+  });
+  if (resp && resp.code !== undefined && resp.code !== 0) {
+    throw new Error(`quote reply rejected code=${resp.code} msg=${resp.msg || ""}`);
+  }
+  remember(resp?.data?.message_id);
+  return resp;
+}
+
 // Patch an already-sent card (streaming / edit). SDK signature:
 // im.v1.message.patch({ path: { message_id }, data: { content: cardJson } }).
 // content is the card JSON itself, not wrapped in msg_type.
@@ -185,6 +215,24 @@ export function placeholderCard() {
   };
 }
 
+// The placeholder card is the first visible message of a reply turn and is
+// later patched into the final answer, so it is the message that carries
+// the quote. Quote first when a parent id is available; any failure falls
+// back to a plain card in the same chat, exactly as before this feature.
+export async function sendPlaceholder(client, { chatId, parentMessageId }) {
+  if (parentMessageId) {
+    try {
+      const resp = await replyCard(client, { parentMessageId, card: placeholderCard() });
+      console.log(`quote placeholder sent for ${parentMessageId}`);
+      return resp?.data?.message_id || null;
+    } catch (e) {
+      console.log("quote placeholder failed, falling back to plain card (non-fatal):", e?.message || e);
+    }
+  }
+  const ph = await sendCard(client, { receiveId: chatId, receiveIdType: "chat_id", card: placeholderCard() });
+  return ph?.data?.message_id || null;
+}
+
 // Streaming step 1: try to patch the placeholder card with the final
 // answer; if patch fails (e.g. update permission not yet effective) or
 // the card would exceed 30KB, fall back to sending a new message, so
@@ -205,7 +253,7 @@ export async function patchProgress(client, placeholderMessageId, streamText) {
   }
 }
 
-export async function sendReplyWithPatch(client, { chatId, placeholderMessageId, answer }) {
+export async function sendReplyWithPatch(client, { chatId, placeholderMessageId, answer, parentMessageId }) {
   if (placeholderMessageId) {
     try {
       const card = cardFromAnswer(answer);
@@ -220,18 +268,30 @@ export async function sendReplyWithPatch(client, { chatId, placeholderMessageId,
       console.log("patch failed, falling back to new message (non-fatal):", e?.message || e);
     }
   }
-  return sendReply(client, { receiveId: chatId, receiveIdType: "chat_id", answer });
+  return sendReply(client, { receiveId: chatId, receiveIdType: "chat_id", answer, parentMessageId });
 }
 
-export async function sendReply(client, { receiveId, receiveIdType, answer }) {
+export async function sendReply(client, { receiveId, receiveIdType, answer, parentMessageId }) {
+  // Quote mode only applies to in-chat replies (receiveIdType "chat_id")
+  // that answer a known user message; proactive sends keep plain create.
+  const quoted = Boolean(parentMessageId) && receiveIdType === "chat_id";
   if (answer && typeof answer === "object" && answer.card) {
     try {
-      return await sendCard(client, { receiveId, receiveIdType, card: answer.card });
+      return quoted
+        ? await replyCard(client, { parentMessageId, card: answer.card })
+        : await sendCard(client, { receiveId, receiveIdType, card: answer.card });
     } catch (e) {
       console.log("card send failed, falling back to text:", e?.message || e);
     }
   }
   const text = typeof answer === "string" ? answer : answer?.text || "";
+  if (quoted) {
+    try {
+      return await replyText(client, { parentMessageId, text });
+    } catch (e) {
+      console.log("quote text reply failed, falling back to plain text (non-fatal):", e?.message || e);
+    }
+  }
   return sendText(client, { receiveId, receiveIdType, text });
 }
 
@@ -358,8 +418,7 @@ export async function backfillMissed(client) {
     await addReactionAck(client, m.messageId);
     let placeholderMessageId = null;
     try {
-      const ph = await sendCard(client, { receiveId: state.chatId, receiveIdType: "chat_id", card: placeholderCard() });
-      placeholderMessageId = ph?.data?.message_id || null;
+      placeholderMessageId = await sendPlaceholder(client, { chatId: state.chatId, parentMessageId: m.messageId });
     } catch (e) {
       console.log("backfill placeholder card failed (non-fatal):", e?.message || e);
     }
@@ -367,7 +426,7 @@ export async function backfillMissed(client) {
       id: `feishu-${m.messageId}`,
       sender: m.senderOpenId,
       text: m.text,
-      reply: (answer) => sendReplyWithPatch(client, { chatId: state.chatId, placeholderMessageId, answer }),
+      reply: (answer) => sendReplyWithPatch(client, { chatId: state.chatId, placeholderMessageId, answer, parentMessageId: m.messageId }),
       onProgress: (streamText) => patchProgress(client, placeholderMessageId, streamText),
     });
     saveState({ chatId: state.chatId, lastCompletedAtMs: m.createMs, lastCompletedMessageId: m.messageId });
@@ -508,8 +567,7 @@ async function run() {
         // creation fails, reply falls back to a new message as before.
         let placeholderMessageId = null;
         try {
-          const ph = await sendCard(client, { receiveId: chatId, receiveIdType: "chat_id", card: placeholderCard() });
-          placeholderMessageId = ph?.data?.message_id || null;
+          placeholderMessageId = await sendPlaceholder(client, { chatId, parentMessageId: messageId });
         } catch (e) {
           console.log("placeholder card failed (non-fatal, reply will be a new message):", e?.message || e);
         }
@@ -517,7 +575,7 @@ async function run() {
           id: `feishu-${messageId || Date.now()}`,
           sender: senderOpenId,
           text,
-          reply: (answer) => sendReplyWithPatch(client, { chatId, placeholderMessageId, answer }),
+          reply: (answer) => sendReplyWithPatch(client, { chatId, placeholderMessageId, answer, parentMessageId: messageId }),
           onProgress: (streamText) => patchProgress(client, placeholderMessageId, streamText),
         });
         // Only now is this message "completed": backfill after a later

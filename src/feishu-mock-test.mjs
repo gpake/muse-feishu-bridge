@@ -26,7 +26,7 @@ fs.writeFileSync(
 process.env.BRIDGE_CONFIG = path.join(tmp, "config.json");
 process.env.BRIDGE_QUEUE_ROOT = path.join(tmp, "queue");
 
-const { extractInbound, remember } = await import("./feishu.mjs");
+const { extractInbound, remember, sendReply, sendPlaceholder } = await import("./feishu.mjs");
 const { handleInbound, INBOX, OUTBOX, DONE } = await import("./queue.mjs");
 const inboxHas = (id) => fs.existsSync(path.join(INBOX, `${id}.json`));
 
@@ -92,6 +92,53 @@ console.log("allowlist (stranger ignored): OK");
 remember("om_test_001");
 if (extractInbound(event) !== null) throw new Error("duplicate message_id must be ignored");
 console.log("redelivery guard: OK");
+
+// 8) quote replies: first send quotes the parent; a reply-API failure
+// still delivers the reply via plain create (never dropped).
+function fakeClient({ failReply = false } = {}) {
+  const calls = [];
+  return {
+    calls,
+    im: {
+      v1: {
+        message: {
+          reply: async (req) => {
+            calls.push(["reply", req?.path?.message_id, req?.data?.msg_type]);
+            if (failReply) throw new Error("reply boom");
+            return { code: 0, data: { message_id: "om_reply_new" } };
+          },
+          create: async (req) => {
+            calls.push(["create", req?.data?.msg_type]);
+            return { code: 0, data: { message_id: "om_create_new" } };
+          },
+        },
+      },
+    },
+  };
+}
+{
+  const fc = fakeClient();
+  const phId = await sendPlaceholder(fc, { chatId: "oc_test_chat", parentMessageId: "om_test_001" });
+  if (phId !== "om_reply_new" || fc.calls.length !== 1 || fc.calls[0][0] !== "reply" || fc.calls[0][1] !== "om_test_001" || fc.calls[0][2] !== "interactive") {
+    throw new Error("quote placeholder must reply to the parent as a card: " + JSON.stringify(fc.calls));
+  }
+  const fc2 = fakeClient();
+  const r = await sendReply(fc2, { receiveId: "oc_test_chat", receiveIdType: "chat_id", answer: "纯文本回复", parentMessageId: "om_test_001" });
+  if (r?.data?.message_id !== "om_reply_new" || fc2.calls[0][0] !== "reply" || fc2.calls[0][2] !== "text") {
+    throw new Error("quote text reply must use message.reply: " + JSON.stringify(fc2.calls));
+  }
+  const fc3 = fakeClient({ failReply: true });
+  const phId3 = await sendPlaceholder(fc3, { chatId: "oc_test_chat", parentMessageId: "om_test_001" });
+  if (phId3 !== "om_create_new" || !fc3.calls.some((c) => c[0] === "create")) {
+    throw new Error("quote placeholder failure must fall back to plain create: " + JSON.stringify(fc3.calls));
+  }
+  const fc4 = fakeClient({ failReply: true });
+  const r4 = await sendReply(fc4, { receiveId: "oc_test_chat", receiveIdType: "chat_id", answer: "回落也要送达", parentMessageId: "om_test_001" });
+  if (r4?.data?.message_id !== "om_create_new") {
+    throw new Error("quote text failure must fall back to plain create, reply not dropped: " + JSON.stringify(fc4.calls));
+  }
+  console.log("quote reply (placeholder + text + fallback delivery): OK");
+}
 
 fs.rmSync(tmp, { recursive: true, force: true });
 console.log("feishu mock test passed (no SDK, no network, no message sent)");
